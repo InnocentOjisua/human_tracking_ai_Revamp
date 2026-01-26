@@ -27,7 +27,7 @@ from ui.overlays import draw_labels
 
 # --- Streamlit Page ---
 st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor", layout="wide")
-st.title("🧠 E-Learning Eyetracker — Live Education Monitor (MVP)")
+st.title("🧠 E-Learning Eyetracker — Live Education Monitor")
 st.caption("On-device. Education features only — not a medical device.")
 
 # --- Config ---
@@ -186,6 +186,8 @@ eye_tracker = EyeTracker(max_len=60*cfg["video"]["fps"])
 if "last_csv_write" not in st.session_state:
     st.session_state.last_csv_write = 0.0
 
+open(st.session_state.csv_path, "w").close()
+
 # --- Main Loop ---
 try:
     while True:
@@ -222,7 +224,8 @@ try:
             eye_tracker.update(left_iris, right_iris, left_eye_lms, right_eye_lms)
         else:
             eye_tracker.update(np.array([[0,0]]), np.array([[0,0]]), None, None)
-        fixation_duration_val, saccades_val, fixation_val, _ = eye_tracker.compute_metrics()
+        fixation_duration_val, saccades_val, fixation_val, *_ = eye_tracker.compute_metrics()
+
 
         # --- Yawn & pupil ---
         yawn_count = fat.get("yawn_count", 0)  # cumulative

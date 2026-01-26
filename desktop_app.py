@@ -32,3 +32,5 @@ if __name__ == "__main__":
     # Open the Streamlit app in a native window
     webview.create_window("E-Learning Eyetracker", STREAMLIT_URL)
     webview.start()
+ 
+ #.\.venv310\venv\Scripts\Activate.ps1
