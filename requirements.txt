@@ -20,6 +20,7 @@ click==8.3.1
 importlib-metadata==7.2.1
 packaging==23.2
 protobuf==3.20.3
+plotly==5.15.0
 pyarrow==23.0.0
 python-dateutil==2.9.0.post0
 requests==2.32.5
