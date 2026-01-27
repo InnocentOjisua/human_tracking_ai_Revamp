@@ -3,7 +3,8 @@ streamlit==1.30.0
 numpy==1.23.5          # Compatible with TensorFlow 2.12
 pandas==2.0.3
 matplotlib==3.8.2
-opencv-contrib-python==4.8.1.78
+opencv-python-headless
+# opencv-contrib-python==4.8.1.78
 mediapipe==0.10.9
 fer==22.5.0
 moviepy==1.0.3
