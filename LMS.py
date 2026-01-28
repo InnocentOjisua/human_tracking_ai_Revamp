@@ -3,14 +3,12 @@ import time
 from collections import deque
 from pathlib import Path
 import csv
-
 import cv2
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
 from datetime import datetime
-
 from core.tracking import Tracker
 from core.metrics import EyeTracker
 from core.features import compute_features
@@ -25,7 +23,7 @@ from modules.ergonomics_distance import distance_status
 from ui.overlays import draw_labels
 
 # --- Streamlit Page ---
-st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor (BrainEyeCore", layout="wide")
+st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor (BrainEyeCore)", layout="wide")
 st.title("🧠 E-Learning Eyetracker — Live Education Monitor")
 st.caption("On-device. Education features only — not a medical device.")
 
@@ -110,24 +108,9 @@ def _draw_futuristic_overlay(img_bgr, face_landmarks):
     cv2.addWeighted(overlay, 0.45, img_bgr, 0.55, 0, img_bgr)
     return img_bgr
 
-# --- Video Capture (Cloud / Network Camera) ---
-cam_source = cfg["video"].get("source", "http://<your-cloud-camera-url>")  # replace with your cloud camera URL
-target_fps = int(cfg["video"].get("fps", 30))
-
-# Open the video stream
-cap = cv2.VideoCapture(cam_source)
-cap.set(cv2.CAP_PROP_FPS, target_fps)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["video"]["width"])
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["video"]["height"])
-
-if not cap.isOpened():
-    st.error(f"Failed to open video source: {cam_source}")
-    st.stop()  # stop the Streamlit app safely
-
-tracker = Tracker()  # initialize the face/eye
-
 # --- Buffers & placeholders ---
 sec_window = 60
+target_fps = int(cfg["video"].get("fps",30))
 buf_len = sec_window * max(1, target_fps)
 fatigue_buf, attention_buf, stress_buf = (deque(maxlen=buf_len) for _ in range(3))
 video_placeholder = st.empty()
@@ -149,7 +132,7 @@ with st.sidebar:
     if "csv_path" not in st.session_state or not st.session_state.csv_path:
         ts = time.strftime("%Y%m%d_%H%M%S")
         st.session_state.csv_path = f"{ts}_metrics.csv"
-        if not Path(st.session_state.csv_path).exists():  # avoid clearing
+        if not Path(st.session_state.csv_path).exists():
             with open(st.session_state.csv_path, "w", newline="") as f:
                 csv.writer(f).writerow([
                     "t_epoch","session_time","face_id","fatigue","attention","stress",
@@ -166,22 +149,43 @@ with st.sidebar:
         key="download_csv"
     )
 
-# --- Initialize EyeTracker ---
+# --- Initialize Tracker & EyeTracker ---
+tracker = Tracker()
 eye_tracker = EyeTracker(max_len=60*cfg["video"]["fps"])
 if "last_csv_write" not in st.session_state:
     st.session_state.last_csv_write = 0.0
-
-# --- Current educational content (CMS placeholder) ---
 current_content = {"title":"Quadratic Equations - Exercise 3","difficulty":"hard"}
+
+# --- Detect environment ---
+import sys
+is_local = hasattr(sys, "ps1") or sys.platform.startswith("win") or sys.platform.startswith("linux")
 
 # --- Main Loop ---
 try:
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            st.error("Camera read failed.")
-            break
+        # --- Get frame ---
+        if is_local:
+            # Use OpenCV camera locally
+            cap = cv2.VideoCapture(cfg["video"]["source"])
+            ok, frame = cap.read()
+            cap.release()
+            if not ok:
+                st.error("Failed to read from local camera.")
+                break
+        else:
+            # Streamlit cloud/browser: use camera_input
+            uploaded_file = st.camera_input("📷 Position your face for tracking")
+            if uploaded_file is None:
+                st.warning("Waiting for camera input...")
+                time.sleep(0.1)
+                continue
+            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+            frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            if frame is None:
+                st.error("Failed to read frame from camera_input.")
+                continue
 
+        # --- Process frame ---
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         det = tracker.process(frame_rgb)
         feats = compute_features(det)
@@ -235,20 +239,13 @@ try:
         labeled = _draw_alert_banner(labeled, active_labels)
         video_placeholder.image(labeled[:, :, ::-1], channels="RGB", use_container_width=True)
 
-        # --- Content-aware Recommendation ---
+        # --- Recommendation ---
         if fatigue_sm > 55:
             recommendation_val = "Take a long break"
         elif attention_sm < 40:
-            if current_content["difficulty"] == "hard":
-                recommendation_val = f"Switch to easier material: {current_content['title']} (medium)"
-            elif current_content["difficulty"] == "medium":
-                recommendation_val = f"Switch to easier material: {current_content['title']} (easy)"
-            else:
-                recommendation_val = "Refocus on current material"
-        elif stress_sm > 60:
-            recommendation_val = "Take a short pause or relax before continuing"
+            recommendation_val = "Refocus"
         else:
-            recommendation_val = f"Continue with current material: {current_content['title']}"
+            recommendation_val = "Keep learning"
 
         # --- CSV logging ---
         t_now = time.time()
@@ -259,8 +256,9 @@ try:
             with open(st.session_state.csv_path, "a", newline="") as f:
                 csv.writer(f).writerow([
                     t_epoch, t_human, face_id, f"{fatigue_sm:.2f}", f"{attention_sm:.2f}", f"{stress_sm:.2f}",
-                    str(post["state"]), str(dist["state"]), str(emotion_val), f"{blink_rate_val:.1f}", f"{perclos_val:.2f}",
-                    yawn_count, yawn_flag, f"{pupil_diameter_val:.2f}", f"{fixation_duration_val:.2f}",
+                    str(post["state"]), str(dist["state"]), str(emotion_val),
+                    f"{blink_rate_val:.1f}", f"{perclos_val:.2f}", yawn_count, yawn_flag,
+                    f"{pupil_diameter_val:.2f}", f"{fixation_duration_val:.2f}",
                     f"{saccades_val:.2f}", f"{fixation_val:.2f}", recommendation_val
                 ])
             st.session_state.last_csv_write = t_now
@@ -294,5 +292,3 @@ try:
 
 except KeyboardInterrupt:
     pass
-finally:
-    cap.release()
