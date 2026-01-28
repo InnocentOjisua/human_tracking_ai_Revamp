@@ -11,6 +11,7 @@ moviepy==1.0.3
 tensorflow==2.12.0
 PyYAML==6.0
 Pillow==10.2.0
+gradio
 
 # Streamlit dependencies
 altair==5.5.0
