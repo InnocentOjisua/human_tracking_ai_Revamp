@@ -110,18 +110,21 @@ def _draw_futuristic_overlay(img_bgr, face_landmarks):
     cv2.addWeighted(overlay, 0.45, img_bgr, 0.55, 0, img_bgr)
     return img_bgr
 
-# --- Video Capture (Cloud or Local) ---
-cam_source = cfg["video"].get("source", 0)  # can be integer or URL string
-target_fps = int(cfg["video"].get("fps",30))
+# --- Video Capture (Cloud / Network Camera) ---
+cam_source = cfg["video"].get("source", "http://<your-cloud-camera-url>")  # replace with your cloud camera URL
+target_fps = int(cfg["video"].get("fps", 30))
+
+# Open the video stream
 cap = cv2.VideoCapture(cam_source)
 cap.set(cv2.CAP_PROP_FPS, target_fps)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["video"]["width"])
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["video"]["height"])
+
 if not cap.isOpened():
     st.error(f"Failed to open video source: {cam_source}")
-    st.stop()
+    st.stop()  # stop the Streamlit app safely
 
-tracker = Tracker()
+tracker = Tracker()  # initialize the face/eye
 
 # --- Buffers & placeholders ---
 sec_window = 60
