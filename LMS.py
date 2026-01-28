@@ -1,4 +1,4 @@
-# Human Signal AI (Revamped MVP) + Metrics + Alerts + Overlay + CSV
+# Human Signal AI (Revamped MVP) — Streamlit Cloud version
 import time
 from collections import deque
 from pathlib import Path
@@ -22,14 +22,14 @@ from modules.posture import posture_status
 from modules.ergonomics_distance import distance_status
 from ui.overlays import draw_labels
 
-# --- Streamlit Page ---
+# --- Streamlit page ---
 st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor (BrainEyeCore)", layout="wide")
 st.title("🧠 E-Learning Eyetracker — Live Education Monitor")
 st.caption("On-device. Education features only — not a medical device.")
 
-# --- Config ---
+# --- Load config ---
 DEFAULT_CFG = {
-    "video": {"source": 0, "fps": 30, "width": 1280, "height": 720},
+    "video": {"fps": 30},
     "windows": {"fatigue_seconds": 60, "attention_seconds": 30, "stress_seconds": 30, "update_hz": 5},
     "thresholds": {
         "perclos_drowsy": 0.25, "blink_rate_high": 25, "gaze_offscreen_secs": 3.0,
@@ -39,7 +39,6 @@ DEFAULT_CFG = {
     },
     "smoothing": {"ema_alpha": 0.25},
     "quality": {"min_brightness": 60, "max_motion_px": 5, "min_confidence": 0.5},
-    "fusion": {"weights": {"fatigue": 0.4, "attention": 0.35, "stress": 0.25}},
 }
 cfg_path = Path("configs/default.yaml")
 user_cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
@@ -112,17 +111,18 @@ def _draw_futuristic_overlay(img_bgr, face_landmarks):
 sec_window = 60
 target_fps = int(cfg["video"].get("fps",30))
 buf_len = sec_window * max(1, target_fps)
-fatigue_buf, attention_buf, stress_buf = (deque(maxlen=buf_len) for _ in range(3))
+if "fatigue_buf" not in st.session_state:
+    st.session_state.fatigue_buf = deque(maxlen=buf_len)
+    st.session_state.attention_buf = deque(maxlen=buf_len)
+    st.session_state.stress_buf = deque(maxlen=buf_len)
 video_placeholder = st.empty()
 c1,c2,c3 = st.columns(3)
 chart1, chart2, chart3 = c1.empty(), c2.empty(), c3.empty()
 status_placeholder = st.empty()
-UPDATE_HZ = int(cfg["windows"].get("update_hz",5))
-_chart_every = max(1,int(target_fps/UPDATE_HZ))
-frame_count = 0
-fatigue_sm = attention_sm = stress_sm = 0.0
-csv_write_interval = 1.0
-t_last = time.time()
+if "fatigue_sm" not in st.session_state: st.session_state.fatigue_sm = 0.0
+if "attention_sm" not in st.session_state: st.session_state.attention_sm = 0.0
+if "stress_sm" not in st.session_state: st.session_state.stress_sm = 0.0
+if "last_csv_write" not in st.session_state: st.session_state.last_csv_write = 0.0
 
 # --- Sidebar & CSV setup ---
 with st.sidebar:
@@ -152,31 +152,16 @@ with st.sidebar:
 # --- Initialize Tracker & EyeTracker ---
 tracker = Tracker()
 eye_tracker = EyeTracker(max_len=60*cfg["video"]["fps"])
-if "last_csv_write" not in st.session_state:
-    st.session_state.last_csv_write = 0.0
 current_content = {"title":"Quadratic Equations - Exercise 3","difficulty":"hard"}
 
-# --- Detect environment ---
-import sys
-is_local = hasattr(sys, "ps1") or sys.platform.startswith("win") or sys.platform.startswith("linux")
+# --- Camera input ---
+uploaded_file = st.camera_input("📷 Position your face for tracking", key="browser_cam")
 
-# --- Main Loop ---
-# --- Main Loop (Browser camera only) ---
-try:
-    while True:
-        # --- Get frame from browser camera ---
-        uploaded_file = st.camera_input("📷 Position your face for tracking")
-        if uploaded_file is None:
-            st.warning("Waiting for camera input...")
-            time.sleep(0.1)
-            continue
+if uploaded_file is not None:
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        if frame is None:
-            st.error("Failed to read frame from camera_input.")
-            continue
-
+    if frame is not None:
         # --- Process frame ---
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         det = tracker.process(frame_rgb)
@@ -193,9 +178,9 @@ try:
 
         # --- Smooth metrics ---
         alpha = cfg["smoothing"]["ema_alpha"]
-        fatigue_sm   = ema(fat.get("score",0.0), fatigue_sm, alpha)
-        attention_sm = ema(att.get("score",0.0), attention_sm, alpha)
-        stress_sm    = ema(strx.get("score",0.0), stress_sm, alpha)
+        st.session_state.fatigue_sm   = ema(fat.get("score",0.0), st.session_state.fatigue_sm, alpha)
+        st.session_state.attention_sm = ema(att.get("score",0.0), st.session_state.attention_sm, alpha)
+        st.session_state.stress_sm    = ema(strx.get("score",0.0), st.session_state.stress_sm, alpha)
 
         # --- EyeTracker update ---
         left_iris = feats.get("left_iris")
@@ -208,21 +193,14 @@ try:
             eye_tracker.update(np.array([[0,0]]), np.array([[0,0]]), None, None)
         fixation_duration_val, saccades_val, fixation_val, *_ = eye_tracker.compute_metrics()
 
-        # --- Yawn & pupil ---
-        yawn_count = fat.get("yawn_count", 0)
-        yawn_flag = 1 if fat.get("yawn_counted_this_yawn", False) else 0
-        pupil_diameter_val = feats.get("pupil_diameter", 0.0)
-        blink_rate_val = fat.get("blink_rate", 0.0)
-        perclos_val = fat.get("perclos", 0.0)
-
         # --- Alerts ---
-        _update_alert_states(attention_sm, fatigue_sm, stress_sm, time.time())
+        _update_alert_states(st.session_state.attention_sm, st.session_state.fatigue_sm, st.session_state.stress_sm, time.time())
         active_labels = [name for name,s in st.session_state.alert_state.items() if s["is_on"]]
 
         # --- Append buffers ---
-        fatigue_buf.append(fatigue_sm)
-        attention_buf.append(attention_sm)
-        stress_buf.append(stress_sm)
+        st.session_state.fatigue_buf.append(st.session_state.fatigue_sm)
+        st.session_state.attention_buf.append(st.session_state.attention_sm)
+        st.session_state.stress_buf.append(st.session_state.stress_sm)
 
         # --- Draw overlays ---
         labeled = draw_labels(frame, post, dist)
@@ -232,55 +210,47 @@ try:
         video_placeholder.image(labeled[:, :, ::-1], channels="RGB", use_container_width=True)
 
         # --- Recommendation ---
-        if fatigue_sm > 55:
+        if st.session_state.fatigue_sm > 55:
             recommendation_val = "Take a long break"
-        elif attention_sm < 40:
+        elif st.session_state.attention_sm < 40:
             recommendation_val = "Refocus"
         else:
             recommendation_val = "Keep learning"
 
         # --- CSV logging ---
         t_now = time.time()
-        if t_now - st.session_state.last_csv_write >= csv_write_interval:
+        if t_now - st.session_state.last_csv_write >= 1.0:
             t_epoch = t_now
             t_human = datetime.fromtimestamp(t_now).strftime("%H:%M:%S")
             face_id = feats.get("face_id", 0)
             with open(st.session_state.csv_path, "a", newline="") as f:
                 csv.writer(f).writerow([
-                    t_epoch, t_human, face_id, f"{fatigue_sm:.2f}", f"{attention_sm:.2f}", f"{stress_sm:.2f}",
+                    t_epoch, t_human, face_id, f"{st.session_state.fatigue_sm:.2f}",
+                    f"{st.session_state.attention_sm:.2f}", f"{st.session_state.stress_sm:.2f}",
                     str(post["state"]), str(dist["state"]), str(emotion_val),
-                    f"{blink_rate_val:.1f}", f"{perclos_val:.2f}", yawn_count, yawn_flag,
-                    f"{pupil_diameter_val:.2f}", f"{fixation_duration_val:.2f}",
+                    f"{fat.get('blink_rate',0.0):.1f}", f"{fat.get('perclos',0.0):.2f}",
+                    fat.get("yawn_count",0), 1 if fat.get("yawn_counted_this_yawn",False) else 0,
+                    f"{feats.get('pupil_diameter',0.0):.2f}", f"{fixation_duration_val:.2f}",
                     f"{saccades_val:.2f}", f"{fixation_val:.2f}", recommendation_val
                 ])
             st.session_state.last_csv_write = t_now
 
-        # --- Status display ---
+        # --- Status ---
         status_placeholder.info(
-            f"Fatigue: {fatigue_sm:0.0f} | Attention: {attention_sm:0.0f} | "
-            f"Stress: {stress_sm:0.0f} | Blink Rate: {blink_rate_val:.1f} | "
-            f"Perclos: {perclos_val:.2f} | Yawn: {yawn_count} | Emotion: {emotion_val} | Recommendation: {recommendation_val}"
+            f"Fatigue: {st.session_state.fatigue_sm:0.0f} | Attention: {st.session_state.attention_sm:0.0f} | "
+            f"Stress: {st.session_state.stress_sm:0.0f} | Blink Rate: {fat.get('blink_rate',0.0):.1f} | "
+            f"Perclos: {fat.get('perclos',0.0):.2f} | Yawn: {fat.get('yawn_count',0)} | "
+            f"Emotion: {emotion_val} | Recommendation: {recommendation_val}"
         )
 
         # --- Plot charts ---
-        frame_count += 1
-        if frame_count % _chart_every == 0:
-            def plot_series(container, ys, title, color):
-                xs = np.arange(len(ys))/max(1,target_fps)
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=3)))
-                fig.update_layout(height=220, margin=dict(l=10,r=10,t=30,b=10), title=title, yaxis=dict(range=[0,100]))
-                container.plotly_chart(fig, use_container_width=True)
-            plot_series(chart1, list(fatigue_buf), "Fatigue", "#1f77b4")
-            plot_series(chart2, list(attention_buf), "Attention", "#2ca02c")
-            plot_series(chart3, list(stress_buf), "Stress", "#d62728")
+        def plot_series(container, ys, title, color):
+            xs = np.arange(len(ys))/max(1,cfg["video"]["fps"])
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=3)))
+            fig.update_layout(height=220, margin=dict(l=10,r=10,t=30,b=10), title=title, yaxis=dict(range=[0,100]))
+            container.plotly_chart(fig, use_container_width=True)
 
-        # --- Frame timing ---
-        dt = time.time() - t_last
-        target_dt = 1.0 / UPDATE_HZ
-        if dt < target_dt:
-            time.sleep(target_dt - dt)
-        t_last = time.time()
-
-except KeyboardInterrupt:
-    pass
+        plot_series(chart1, list(st.session_state.fatigue_buf), "Fatigue", "#1f77b4")
+        plot_series(chart2, list(st.session_state.attention_buf), "Attention", "#2ca02c")
+        plot_series(chart3, list(st.session_state.stress_buf), "Stress", "#d62728")
