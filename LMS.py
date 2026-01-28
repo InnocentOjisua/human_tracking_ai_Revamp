@@ -1,9 +1,8 @@
-## Human Signal AI (Revamped MVP) + Metrics + Alerts + Overlay + CSV
+# Human Signal AI (Revamped MVP) + Metrics + Alerts + Overlay + CSV
 import time
 from collections import deque
 from pathlib import Path
 import csv
-
 
 import cv2
 import numpy as np
@@ -26,7 +25,7 @@ from modules.ergonomics_distance import distance_status
 from ui.overlays import draw_labels
 
 # --- Streamlit Page ---
-st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor", layout="wide")
+st.set_page_config(page_title="E-Learning Eyetracker — Live Monitor (BrainEyeCore", layout="wide")
 st.title("🧠 E-Learning Eyetracker — Live Education Monitor")
 st.caption("On-device. Education features only — not a medical device.")
 
@@ -97,7 +96,8 @@ def _draw_alert_banner(img_bgr, labels):
 def _draw_futuristic_overlay(img_bgr, face_landmarks):
     if face_landmarks is None or len(face_landmarks) < 478: return img_bgr
     pts = face_landmarks[:, :2].astype(np.int32)
-    idxs = {"left_eye":33,"right_eye":263,"nose_tip":1,"chin":152,"forehead":10,"mouth_left":61,"mouth_right":291,"left_iris":468,"right_iris":473}
+    idxs = {"left_eye":33,"right_eye":263,"nose_tip":1,"chin":152,"forehead":10,
+            "mouth_left":61,"mouth_right":291,"left_iris":468,"right_iris":473}
     c1, c2 = (255,255,255),(90,220,255)
     P = lambda i: tuple(pts[i])
     overlay = img_bgr.copy()
@@ -110,13 +110,17 @@ def _draw_futuristic_overlay(img_bgr, face_landmarks):
     cv2.addWeighted(overlay, 0.45, img_bgr, 0.55, 0, img_bgr)
     return img_bgr
 
-# --- Video Capture ---
-cam_index = int(cfg["video"].get("source", 0))
+# --- Video Capture (Cloud or Local) ---
+cam_source = cfg["video"].get("source", 0)  # can be integer or URL string
 target_fps = int(cfg["video"].get("fps",30))
-cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+cap = cv2.VideoCapture(cam_source)
 cap.set(cv2.CAP_PROP_FPS, target_fps)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["video"]["width"])
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["video"]["height"])
+if not cap.isOpened():
+    st.error(f"Failed to open video source: {cam_source}")
+    st.stop()
+
 tracker = Tracker()
 
 # --- Buffers & placeholders ---
@@ -134,42 +138,22 @@ fatigue_sm = attention_sm = stress_sm = 0.0
 csv_write_interval = 1.0
 t_last = time.time()
 
-# --- Sidebar ---
+# --- Sidebar & CSV setup ---
 with st.sidebar:
     st.header("Controls")
-
-    # Toggle for futuristic overlay
     show_futuristic = st.toggle("Futuristic overlay", value=True, key="show_futuristic")
-
     st.markdown("---")
-
-    # CSV creation & download
     if "csv_path" not in st.session_state or not st.session_state.csv_path:
         ts = time.strftime("%Y%m%d_%H%M%S")
         st.session_state.csv_path = f"{ts}_metrics.csv"
-        with open(st.session_state.csv_path, "w", newline="") as f:
-           csv.writer(f).writerow([
-    "t_epoch",
-    "session_time",
-    "face_id",
-    "fatigue",
-    "attention",
-    "stress",
-    "posture",
-    "distance",
-    "emotion",
-    "blink_rate",
-    "perclos",
-    "yawn_count",
-    "yawn_event",
-    "pupil_diameter",
-    "fixation_duration",
-    "saccades",
-    "fixation",
-    "recommendation"
-])
-
-
+        if not Path(st.session_state.csv_path).exists():  # avoid clearing
+            with open(st.session_state.csv_path, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "t_epoch","session_time","face_id","fatigue","attention","stress",
+                    "posture","distance","emotion","blink_rate","perclos","yawn_count",
+                    "yawn_event","pupil_diameter","fixation_duration","saccades","fixation",
+                    "recommendation"
+                ])
     csv_file = Path(st.session_state.csv_path)
     st.download_button(
         label="📥 Download CSV",
@@ -181,151 +165,131 @@ with st.sidebar:
 
 # --- Initialize EyeTracker ---
 eye_tracker = EyeTracker(max_len=60*cfg["video"]["fps"])
-
-# --- CSV write timer ---
 if "last_csv_write" not in st.session_state:
     st.session_state.last_csv_write = 0.0
 
-open(st.session_state.csv_path, "w").close()
+# --- Current educational content (CMS placeholder) ---
+current_content = {"title":"Quadratic Equations - Exercise 3","difficulty":"hard"}
 
 # --- Main Loop ---
-# --- Main Loop with Streamlit camera_input ---
-import tempfile
+try:
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            st.error("Camera read failed.")
+            break
 
-# Temporary file for live frame capture
-if "camera_frame" not in st.session_state:
-    st.session_state.camera_frame = None
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        det = tracker.process(frame_rgb)
+        feats = compute_features(det)
+        quality = estimate_quality(frame_rgb, det, feats, cfg)
 
-# Main loop replacement
-while True:
-    # --- Get camera frame ---
-    uploaded_file = st.camera_input("📷 Position your face for tracking")
-    if uploaded_file is None:
-        st.warning("Waiting for camera input...")
-        time.sleep(0.1)
-        continue
+        # --- Metrics ---
+        post = posture_status(feats, quality, cfg)
+        fat  = fatigue_score(feats, quality, cfg, posture_state=post["state"])
+        att  = attention_score(feats, quality, cfg)
+        strx = stress_score(feats, quality, cfg)
+        dist = distance_status(det, cfg)
+        emotion_val = detect_emotion(frame_rgb)
 
-    # Convert uploaded file to OpenCV format
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if frame is None:
-        st.error("Failed to read frame.")
-        continue
+        # --- Smooth metrics ---
+        alpha = cfg["smoothing"]["ema_alpha"]
+        fatigue_sm   = ema(fat.get("score",0.0), fatigue_sm, alpha)
+        attention_sm = ema(att.get("score",0.0), attention_sm, alpha)
+        stress_sm    = ema(strx.get("score",0.0), stress_sm, alpha)
 
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    det = tracker.process(frame_rgb)
-    feats = compute_features(det)
-    quality = estimate_quality(frame_rgb, det, feats, cfg)
+        # --- Update EyeTracker ---
+        left_iris = feats.get("left_iris")
+        right_iris = feats.get("right_iris")
+        left_eye_lms = feats.get("left_eye_landmarks")
+        right_eye_lms = feats.get("right_eye_landmarks")
+        if left_iris is not None and right_iris is not None:
+            eye_tracker.update(left_iris, right_iris, left_eye_lms, right_eye_lms)
+        else:
+            eye_tracker.update(np.array([[0,0]]), np.array([[0,0]]), None, None)
+        fixation_duration_val, saccades_val, fixation_val, *_ = eye_tracker.compute_metrics()
 
-    # --- Metrics ---
-    post = posture_status(feats, quality, cfg)
-    fat  = fatigue_score(feats, quality, cfg, posture_state=post["state"])
-    att  = attention_score(feats, quality, cfg)
-    strx = stress_score(feats, quality, cfg)
-    dist = distance_status(det, cfg)
-    emotion_val = detect_emotion(frame_rgb)
+        # --- Yawn & pupil ---
+        yawn_count = fat.get("yawn_count", 0)
+        yawn_flag = 1 if fat.get("yawn_counted_this_yawn", False) else 0
+        pupil_diameter_val = feats.get("pupil_diameter", 0.0)
+        blink_rate_val = fat.get("blink_rate", 0.0)
+        perclos_val = fat.get("perclos", 0.0)
 
-    # --- Smooth metrics ---
-    alpha = cfg["smoothing"]["ema_alpha"]
-    fatigue_sm   = ema(fat.get("score",0.0), fatigue_sm, alpha)
-    attention_sm = ema(att.get("score",0.0), attention_sm, alpha)
-    stress_sm    = ema(strx.get("score",0.0), stress_sm, alpha)
+        # --- Alerts ---
+        _update_alert_states(attention_sm, fatigue_sm, stress_sm, time.time())
+        active_labels = [name for name,s in st.session_state.alert_state.items() if s["is_on"]]
 
-    # --- Update EyeTracker ---
-    left_iris = feats.get("left_iris")
-    right_iris = feats.get("right_iris")
-    left_eye_lms = feats.get("left_eye_landmarks")
-    right_eye_lms = feats.get("right_eye_landmarks")
-    if left_iris is not None and right_iris is not None:
-        eye_tracker.update(left_iris, right_iris, left_eye_lms, right_eye_lms)
-    else:
-        eye_tracker.update(np.array([[0,0]]), np.array([[0,0]]), None, None)
-    fixation_duration_val, saccades_val, fixation_val, *_ = eye_tracker.compute_metrics()
+        # --- Append buffers ---
+        fatigue_buf.append(fatigue_sm)
+        attention_buf.append(attention_sm)
+        stress_buf.append(stress_sm)
 
-    # --- Yawn & pupil ---
-    yawn_count = fat.get("yawn_count", 0)
-    yawn_flag = 1 if fat.get("yawn_counted_this_yawn", False) else 0
-    pupil_diameter_val = feats.get("pupil_diameter", 0.0)
-    blink_rate_val = fat.get("blink_rate", 0.0)
-    perclos_val = fat.get("perclos", 0.0)
+        # --- Draw overlays ---
+        labeled = draw_labels(frame, post, dist)
+        if show_futuristic:
+            labeled = _draw_futuristic_overlay(labeled, feats.get("face", None))
+        labeled = _draw_alert_banner(labeled, active_labels)
+        video_placeholder.image(labeled[:, :, ::-1], channels="RGB", use_container_width=True)
 
-    # --- Alerts ---
-    _update_alert_states(attention_sm, fatigue_sm, stress_sm, time.time())
-    active_labels = [name for name,s in st.session_state.alert_state.items() if s["is_on"]]
+        # --- Content-aware Recommendation ---
+        if fatigue_sm > 55:
+            recommendation_val = "Take a long break"
+        elif attention_sm < 40:
+            if current_content["difficulty"] == "hard":
+                recommendation_val = f"Switch to easier material: {current_content['title']} (medium)"
+            elif current_content["difficulty"] == "medium":
+                recommendation_val = f"Switch to easier material: {current_content['title']} (easy)"
+            else:
+                recommendation_val = "Refocus on current material"
+        elif stress_sm > 60:
+            recommendation_val = "Take a short pause or relax before continuing"
+        else:
+            recommendation_val = f"Continue with current material: {current_content['title']}"
 
-    # --- Append buffers ---
-    fatigue_buf.append(fatigue_sm)
-    attention_buf.append(attention_sm)
-    stress_buf.append(stress_sm)
+        # --- CSV logging ---
+        t_now = time.time()
+        if t_now - st.session_state.last_csv_write >= csv_write_interval:
+            t_epoch = t_now
+            t_human = datetime.fromtimestamp(t_now).strftime("%H:%M:%S")
+            face_id = feats.get("face_id", 0)
+            with open(st.session_state.csv_path, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    t_epoch, t_human, face_id, f"{fatigue_sm:.2f}", f"{attention_sm:.2f}", f"{stress_sm:.2f}",
+                    str(post["state"]), str(dist["state"]), str(emotion_val), f"{blink_rate_val:.1f}", f"{perclos_val:.2f}",
+                    yawn_count, yawn_flag, f"{pupil_diameter_val:.2f}", f"{fixation_duration_val:.2f}",
+                    f"{saccades_val:.2f}", f"{fixation_val:.2f}", recommendation_val
+                ])
+            st.session_state.last_csv_write = t_now
 
-    # --- Draw overlays ---
-    labeled = draw_labels(frame, post, dist)
-    if show_futuristic:
-        labeled = _draw_futuristic_overlay(labeled, feats.get("face", None))
-    labeled = _draw_alert_banner(labeled, active_labels)
-    video_placeholder.image(labeled[:, :, ::-1], channels="RGB", use_container_width=True)
+        # --- Status display ---
+        status_placeholder.info(
+            f"Fatigue: {fatigue_sm:0.0f} | Attention: {attention_sm:0.0f} | "
+            f"Stress: {stress_sm:0.0f} | Blink Rate: {blink_rate_val:.1f} | "
+            f"Perclos: {perclos_val:.2f} | Yawn: {yawn_count} | Emotion: {emotion_val} | Recommendation: {recommendation_val}"
+        )
 
-    # --- Recommendation ---
-    if fatigue_sm > 55 or (50 <= fatigue_sm <= 55 and attention_sm < 30):
-        recommendation_val = "Take a long break"
-    elif attention_sm < 40:
-        recommendation_val = "Refocus"
-    else:
-        recommendation_val = "Keep learning"
+        # --- Plot charts ---
+        frame_count += 1
+        if frame_count % _chart_every == 0:
+            def plot_series(container, ys, title, color):
+                xs = np.arange(len(ys))/max(1,target_fps)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=3)))
+                fig.update_layout(height=220, margin=dict(l=10,r=10,t=30,b=10), title=title, yaxis=dict(range=[0,100]))
+                container.plotly_chart(fig, use_container_width=True)
+            plot_series(chart1, list(fatigue_buf), "Fatigue", "#1f77b4")
+            plot_series(chart2, list(attention_buf), "Attention", "#2ca02c")
+            plot_series(chart3, list(stress_buf), "Stress", "#d62728")
 
-    # --- CSV logging ---
-    t_now = time.time()
-    if t_now - st.session_state.last_csv_write >= csv_write_interval:
-        t_epoch = t_now
-        t_human = datetime.fromtimestamp(t_now).strftime("%H:%M:%S")
-        face_id = feats.get("face_id", 0)
+        # --- Frame timing ---
+        dt = time.time() - t_last
+        target_dt = 1.0 / UPDATE_HZ
+        if dt < target_dt:
+            time.sleep(target_dt - dt)
+        t_last = time.time()
 
-        with open(st.session_state.csv_path, "a", newline="") as f:
-            csv.writer(f).writerow([
-                t_epoch,
-                t_human,
-                face_id,
-                f"{fatigue_sm:.2f}",
-                f"{attention_sm:.2f}",
-                f"{stress_sm:.2f}",
-                str(post["state"]),
-                str(dist["state"]),
-                str(emotion_val),
-                f"{blink_rate_val:.1f}",
-                f"{perclos_val:.2f}",
-                yawn_count,
-                yawn_flag,
-                f"{pupil_diameter_val:.2f}",
-                f"{fixation_duration_val:.2f}",
-                f"{saccades_val:.2f}",
-                f"{fixation_val:.2f}",
-                recommendation_val
-            ])
-        st.session_state.last_csv_write = t_now
-
-    # --- Status display ---
-    status_placeholder.info(
-        f"Fatigue: {fatigue_sm:0.0f} | Attention: {attention_sm:0.0f} | "
-        f"Stress: {stress_sm:0.0f} | Blink Rate: {blink_rate_val:.1f} | "
-        f"Perclos: {perclos_val:.2f} | Yawn: {yawn_count} | Emotion: {emotion_val} | Recommendation: {recommendation_val}"
-    )
-
-    # --- Plot charts ---
-    frame_count += 1
-    if frame_count % _chart_every == 0:
-        def plot_series(container, ys, title, color):
-            xs = np.arange(len(ys))/max(1,target_fps)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=3)))
-            fig.update_layout(height=220, margin=dict(l=10,r=10,t=30,b=10), title=title, yaxis=dict(range=[0,100]))
-            container.plotly_chart(fig, use_container_width=True)
-        plot_series(chart1, list(fatigue_buf), "Fatigue", "#1f77b4")
-        plot_series(chart2, list(attention_buf), "Attention", "#2ca02c")
-        plot_series(chart3, list(stress_buf), "Stress", "#d62728")
-
-    # --- Frame timing ---
-    dt = time.time() - t_last
-    target_dt = 1.0 / UPDATE_HZ
-    if dt < target_dt:
-        time.sleep(target_dt - dt)
-    t_last = time.time()
+except KeyboardInterrupt:
+    pass
+finally:
+    cap.release()
